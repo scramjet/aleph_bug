@@ -56,14 +56,18 @@
   (OutputStreamWriter. (.getOutputStream socket) (Charset/forName "UTF-8")))
 
 (def json-frame
-  (compile-frame (string :utf-8
-                         :delimiters ["\r\n"]
-                         :char-sequence true)
-                 #(json/generate-string %)
-                 #(json/parse-stream (CharSequenceReader. %) true)))
+  (compile-frame
+    (string :utf-8
+      :delimiters ["\r\n"]
+      :char-sequence true)
+    #(json/generate-string %)
+    #(json/parse-stream (CharSequenceReader. %) true)))
 
 (defn start-json-server [handler port]
-  (start-tcp-server handler {:port port :frame json-frame}))
+  (start-tcp-server handler
+    {:port port
+     :probes nil ;;{:traffic:out (sink prn)}
+     :frame json-frame}))
 
 ;; setup a standard test fixture with a server and two clients, all
 ;; auto-closed
@@ -86,13 +90,14 @@
 ;; write message as JSON to a writer
 (defn out-json [out message]
   (binding [*out* out]
-    (println (json/generate-string message))))
+    (print (json/generate-string message) "\r\n")
+    (flush)))
 
 ;; read message as JSON from a reader
 (defn in-json [in]
   (time-limited 2000
-                (binding [*in* in]
-                  (json/parse-string (read-line)))))
+    (binding [*in* in]
+      (json/parse-string (read-line) true))))
 
 ;; require a JSON message from in with :type == message-type
 (defmacro require-in-json [in message-type]
@@ -101,18 +106,19 @@
 ;; send a login message
 (defn login [in out client-id]
   (out-json out
-            {:type :login :client-id client-id
+            {:type "login" :client-id client-id
              :auth-name "test" :auth-password "password"})
-  (require-in-json in :logged-in))
+  (require-in-json in "logged-in"))
 
 (defn handle-login [ch db ip-address message]
   (println "handle-login " message)
   ;; create a client instance
+  (enqueue ch {:type "logged-in"})
   {:channel ch :ip ip-address})
 
 (defn handle-message [server client message]
-  (println ("received message " message))
-  (enqueue (:channel client) {:type :reply :payload (:payload message)}))
+  (println "received message " message)
+  (enqueue (:channel client) {:type "reply" :payload (:payload message)}))
 
 (defn login-handler [server ch client-info]
   (println "in login-handler")
@@ -121,12 +127,12 @@
                  (ch-close ch)))
   (on-closed ch (fn [] (println "closed")))
   (receive ch
-           (fn [login]
-             (if-let [client
-                      (handle-login ch (:db server)
-                                    (:address client-info) login)]
-               (receive-all ch
-                            (partial handle-message server client))))))
+    (fn [login]
+      (if-let [client
+               (handle-login ch (:db server)
+                 (:address client-info) login)]
+        (receive-all ch
+          (partial handle-message server client))))))
 
 (deftest test-server
   (let [server {:server-name "test server"}]
@@ -140,6 +146,6 @@
         (out-json client2-out {:payload "client2"})
 
         (let [reply1 (in-json client1-in)
-              reply2 (in-json client1-in)]
+              reply2 (in-json client2-in)]
           (is (= (:payload reply1) "client1"))
           (is (= (:payload reply2) "client2")))))))
